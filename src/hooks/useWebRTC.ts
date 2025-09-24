@@ -30,7 +30,14 @@ export const useWebRTC = (): UseWebRTCReturn => {
   const createPeer = useCallback((initiator: boolean, signal?: string) => {
     const peer = new SimplePeer({
       initiator,
-      trickle: false
+      trickle: false,
+      config: {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          { urls: 'stun:stun2.l.google.com:19302' }
+        ]
+      }
     })
 
     peer.on('signal', (data: SimplePeer.SignalData) => {
@@ -44,20 +51,47 @@ export const useWebRTC = (): UseWebRTCReturn => {
       console.log('WebRTC 연결 성공')
     })
 
+    // 파일 수신용 변수들
+    let fileChunks: Uint8Array[] = []
+    let fileInfo: { name: string; size: number; mimeType: string; totalChunks: number } | null = null
+    let receivedChunks = 0
+
     peer.on('data', (data: Buffer) => {
       try {
         const message = JSON.parse(data.toString())
 
         if (message.type === 'file-info') {
           // 파일 정보 수신
+          fileInfo = message
+          fileChunks = []
+          receivedChunks = 0
           console.log('파일 정보 수신:', message.name, message.size)
         } else if (message.type === 'file-chunk') {
-          // 파일 청크 수신 및 재조립 로직
-          const blob = new Blob([message.data], { type: message.mimeType })
-          const file = new File([blob], message.name, { type: message.mimeType })
-          onReceiveFileCallback.current?.(file)
+          // 파일 청크 수신
+          const chunkData = new Uint8Array(message.data)
+          fileChunks[message.chunkIndex] = chunkData
+          receivedChunks++
 
-          if (message.isLast) {
+          // 진행률 업데이트
+          if (fileInfo) {
+            const progress = (receivedChunks / fileInfo.totalChunks) * 100
+            onProgressCallback.current?.(progress)
+          }
+
+          if (message.isLast && fileInfo) {
+            // 모든 청크 수신 완료 - 파일 재조립
+            const totalSize = fileChunks.reduce((sum, chunk) => sum + chunk.length, 0)
+            const combinedArray = new Uint8Array(totalSize)
+            let offset = 0
+
+            for (const chunk of fileChunks) {
+              combinedArray.set(chunk, offset)
+              offset += chunk.length
+            }
+
+            const blob = new Blob([combinedArray], { type: fileInfo.mimeType })
+            const file = new File([blob], fileInfo.name, { type: fileInfo.mimeType })
+            onReceiveFileCallback.current?.(file)
             console.log('파일 수신 완료')
           }
         }
@@ -92,16 +126,16 @@ export const useWebRTC = (): UseWebRTCReturn => {
     createPeer(false, signal)
   }, [createPeer])
 
-  const sendFile = useCallback((file: File) => {
+  const sendFile = useCallback(async (file: File) => {
     if (!peerRef.current || !isConnected) {
       console.error('WebRTC 연결이 없습니다')
       return
     }
 
     const reader = new FileReader()
-    reader.onload = () => {
+    reader.onload = async () => {
       const arrayBuffer = reader.result as ArrayBuffer
-      const chunkSize = 16384 // 16KB 청크
+      const chunkSize = 8192 // 8KB 청크 (더 작은 크기)
       const totalChunks = Math.ceil(arrayBuffer.byteLength / chunkSize)
 
       // 파일 정보 전송
@@ -113,24 +147,34 @@ export const useWebRTC = (): UseWebRTCReturn => {
         totalChunks
       }))
 
-      // 파일 청크 전송
+      // 파일 청크를 순차적으로 전송 (비동기)
       for (let i = 0; i < totalChunks; i++) {
         const start = i * chunkSize
         const end = Math.min(start + chunkSize, arrayBuffer.byteLength)
         const chunk = arrayBuffer.slice(start, end)
 
-        peerRef.current?.send(JSON.stringify({
-          type: 'file-chunk',
-          name: file.name,
-          mimeType: file.type,
-          data: Array.from(new Uint8Array(chunk)),
-          chunkIndex: i,
-          totalChunks,
-          isLast: i === totalChunks - 1
-        }))
+        try {
+          peerRef.current?.send(JSON.stringify({
+            type: 'file-chunk',
+            name: file.name,
+            mimeType: file.type,
+            data: Array.from(new Uint8Array(chunk)),
+            chunkIndex: i,
+            totalChunks,
+            isLast: i === totalChunks - 1
+          }))
 
-        const progress = ((i + 1) / totalChunks) * 100
-        onProgressCallback.current?.(progress)
+          const progress = ((i + 1) / totalChunks) * 100
+          onProgressCallback.current?.(progress)
+
+          // 작은 지연으로 과부하 방지
+          if (i % 10 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 10))
+          }
+        } catch (error) {
+          console.error(`청크 ${i} 전송 오류:`, error)
+          break
+        }
       }
     }
     reader.readAsArrayBuffer(file)

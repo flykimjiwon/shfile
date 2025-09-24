@@ -19,10 +19,16 @@ export async function POST(request: NextRequest) {
       sessions.delete(sessionId)
     }, 30 * 60 * 1000)
 
+    const baseUrl = process.env.VERCEL_URL
+      ? `https://${process.env.VERCEL_URL}`
+      : process.env.NEXT_PUBLIC_BASE_URL
+      ? process.env.NEXT_PUBLIC_BASE_URL
+      : 'http://localhost:3000'
+
     return NextResponse.json({
       success: true,
       sessionId,
-      shareUrl: `https://${process.env.VERCEL_URL || process.env.NEXT_PUBLIC_BASE_URL?.replace('http://', '').replace('https://', '') || 'localhost:3001'}/join/${sessionId}`
+      shareUrl: `${baseUrl}/join/${sessionId}`
     })
   } catch (error) {
     console.error('세션 생성 오류:', error)
